@@ -13,6 +13,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import fitz
 import pdfplumber
+import time
 
 try:
     from dotenv import load_dotenv
@@ -26,16 +27,22 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ── Helper functions ─────────────────────────────────────────
 
-def call_groq(client, messages, max_tokens=1000):
+def call_groq(client, messages, max_tokens=1000, preferred_model=None):
     """
     Call Groq API with automatic fallback if a model is deprecated or unavailable.
     """
-    candidate_models = [
-        os.environ.get('GROQ_MODEL', 'llama-3.1-8b-instant'),
+    candidate_models = []
+    if preferred_model:
+        candidate_models.append(preferred_model)
+    env_model = os.environ.get('GROQ_MODEL')
+    if env_model:
+        candidate_models.append(env_model)
+    candidate_models.extend([
+        'openai/gpt-oss-20b',
+        'openai/gpt-oss-120b',
+        'qwen/qwen3.8-27b',
         'llama-3.1-8b-instant',
-        'llama-3.3-70b-versatile',
-        'llama3-8b-8192',
-    ]
+    ])
     seen = set()
     models = [m for m in candidate_models if m and not (m in seen or seen.add(m))]
 
@@ -50,7 +57,7 @@ def call_groq(client, messages, max_tokens=1000):
         except Exception as e:
             last_exc = e
             err_msg = str(e).lower()
-            if 'model_not_found' in err_msg or 'does not exist' in err_msg or 'not have access' in err_msg:
+            if any(k in err_msg for k in ['model_not_found', 'model_decommissioned', 'decommissioned', 'does not exist', 'not have access', 'deprecated']):
                 continue
             raise e
     raise last_exc
@@ -261,6 +268,34 @@ def health():
     return jsonify({"status": "ok", "message": "PaperFinder backend running"})
 
 
+@app.route('/test-llm', methods=['POST'])
+def test_llm():
+    data = request.get_json(silent=True) or {}
+    api_key = data.get('apiKey') or os.environ.get('GROQ_API_KEY')
+    model = data.get('model') or 'openai/gpt-oss-20b'
+
+    if not api_key:
+        return jsonify({"success": False, "error": "No API key provided. Please paste your API key."}), 400
+
+    try:
+        t0 = time.time()
+        client = Groq(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=20,
+            messages=[{"role": "user", "content": "Respond with 'OK'"}]
+        )
+        latency = round(time.time() - t0, 2)
+        return jsonify({
+            "success": True,
+            "latency_ms": latency,
+            "model": model,
+            "reply": resp.choices[0].message.content.strip()
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
 @app.route('/extract-pdf', methods=['POST'])
 def extract_pdf():
     if 'file' not in request.files:
@@ -313,6 +348,8 @@ def extract_pdf_full():
 def chat_pdf():
     question = request.form.get('question', '').strip()
     pdf_text  = request.form.get('pdf_text',  '').strip()
+    api_key  = request.form.get('apiKey') or os.environ.get('GROQ_API_KEY')
+    model    = request.form.get('model') or os.environ.get('GROQ_MODEL')
     if not question:
         return jsonify({"error": "No question provided"}), 400
     if not pdf_text:
@@ -337,11 +374,12 @@ INSTRUCTIONS:
 Answer:"""
 
     try:
-        client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
+        client = Groq(api_key=api_key)
         response = call_groq(
             client=client,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000
+            max_tokens=1000,
+            preferred_model=model
         )
         answer = response.choices[0].message.content
         return jsonify({"success": True, "answer": answer})
@@ -485,12 +523,16 @@ Start immediately with the Abstract. Do NOT write the title again. Do NOT add pr
 Do NOT use markdown symbols (no **, no *, no ##).
 Minimum 2500 words. All body text in flowing academic paragraphs, no bullet points."""
 
+    api_key  = request.form.get('apiKey') or os.environ.get('GROQ_API_KEY')
+    model    = request.form.get('model') or os.environ.get('GROQ_MODEL')
+
     try:
-        client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
+        client = Groq(api_key=api_key)
         response = call_groq(
             client=client,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=6000
+            max_tokens=6000,
+            preferred_model=model
         )
         paper_content = sanitize_text(response.choices[0].message.content)
     except Exception as e:
@@ -788,6 +830,9 @@ Minimum 2500 words. All body text in flowing academic paragraphs, no bullet poin
 def clarify_search():
     data  = request.get_json(silent=True) or {}
     query = data.get('query', '').strip()
+    api_key = data.get('apiKey') or os.environ.get('GROQ_API_KEY')
+    model = data.get('model') or os.environ.get('GROQ_MODEL')
+
     if not query:
         return jsonify({"error": "No query provided"}), 400
 
@@ -833,11 +878,12 @@ Now generate for the query: "{query}"
 Return ONLY the JSON, no explanation."""
 
     try:
-        client   = Groq(api_key=os.environ.get('GROQ_API_KEY'))
+        client   = Groq(api_key=api_key)
         response = call_groq(
             client=client,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=600
+            max_tokens=600,
+            preferred_model=model
         )
         raw = response.choices[0].message.content.strip()
 
