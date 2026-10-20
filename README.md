@@ -7,7 +7,7 @@ Flask backend for PaperFinder Pro, providing PDF extraction, AI-powered academic
 - **AI Paper Generation**: Synthesizes and drafts IEEE-formatted `.docx` documents using Groq LLM (`llama-3.3-70b-versatile`).
 - **PDF Chat**: Context-aware Q&A over research papers using Groq LLM.
 - **Search Clarification**: Smart question & keyword suggestions for literature review queries.
-- **Health Check**: `/health` endpoint for uptime monitoring and Railway health checks.
+- **Health Check**: `/health` endpoint for uptime monitoring and health checks.
 
 ## Environment Variables
 Create a `.env` file in the root directory:
@@ -35,11 +35,19 @@ PORT=8080
    gunicorn app:app --bind 0.0.0.0:8080
    ```
 
-## Deploying to Railway
-1. Push this folder/repository to GitHub.
-2. In [Railway](https://railway.app), click **New Project** → **Deploy from GitHub repo**.
-3. Select this repository.
-4. Go to **Variables** tab in your Railway service and add:
+## Deploying to Render (Free Tier)
+1. Push this folder to GitHub.
+2. In [Render Dashboard](https://dashboard.render.com), click **New +** → **Web Service**.
+3. Connect your GitHub repository (`paperfinder`).
+4. Settings:
+   - **Name**: `paperfinder`
+   - **Runtime**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --timeout 120 --workers 2`
+   - **Instance Type**: `Free`
+5. Under **Environment Variables**, add:
    - `GROQ_API_KEY`: Your Groq API key (`gsk_...`)
-5. In **Settings** → **Networking**, click **Generate Domain** to get your public backend URL (e.g. `https://your-service.up.railway.app`).
-6. Copy that URL and set it in your frontend as `VITE_BACKEND_URL`.
+   - `PYTHON_VERSION`: `3.11.9`
+6. Click **Create Web Service**.
+7. Once live, your backend URL will be: `https://<your-service-name>.onrender.com`.
+   Verify at `https://<your-service-name>.onrender.com/health`.

@@ -27,7 +27,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ── Helper functions ─────────────────────────────────────────
 
-def call_groq(client, messages, max_tokens=1000, preferred_model=None):
+def call_groq(client, messages, max_tokens=1000, preferred_model=None, response_format=None):
     """
     Call Groq API with automatic fallback if a model is deprecated or unavailable.
     """
@@ -49,16 +49,29 @@ def call_groq(client, messages, max_tokens=1000, preferred_model=None):
     last_exc = None
     for model_name in models:
         try:
-            return client.chat.completions.create(
-                model=model_name,
-                max_tokens=max_tokens,
-                messages=messages
-            )
+            params = {
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "messages": messages
+            }
+            if response_format:
+                params["response_format"] = response_format
+            return client.chat.completions.create(**params)
         except Exception as e:
             last_exc = e
             err_msg = str(e).lower()
             if any(k in err_msg for k in ['model_not_found', 'model_decommissioned', 'decommissioned', 'does not exist', 'not have access', 'deprecated']):
                 continue
+            # If model didn't support response_format, try once without it
+            if response_format and ('response_format' in err_msg or 'json' in err_msg):
+                try:
+                    return client.chat.completions.create(
+                        model=model_name,
+                        max_tokens=max_tokens,
+                        messages=messages
+                    )
+                except Exception as inner_e:
+                    last_exc = inner_e
             raise e
     raise last_exc
 
@@ -355,21 +368,28 @@ def chat_pdf():
     if not pdf_text:
         return jsonify({"error": "No PDF text provided"}), 400
 
-    prompt = f"""You are a helpful research assistant. A user has uploaded a PDF and wants to ask questions about it.
+    prompt = f"""You are an expert academic research assistant. A user has uploaded a research paper PDF and asked a question about it.
 
 PDF CONTENT:
-{pdf_text[:8000]}
+{pdf_text[:10000]}
 
 USER QUESTION:
 {question}
 
-INSTRUCTIONS:
-- Answer ONLY based on the PDF content above
-- Be specific and reference relevant sections when helpful
-- If the answer is not found in the PDF, clearly say so
-- Keep answers clear, concise and academic
-- Format your answer with proper paragraphs
-- If the question asks for a summary, provide a structured summary
+STRICT INSTRUCTIONS ON FORMATTING AND STYLE:
+1. NO UNNECESSARY EMOJIS:
+   - Absolutely DO NOT use any emojis (e.g. no 📄, 🔬, 💡, 📊, 🚀, 📌, etc.) anywhere in your response.
+   - ONLY include emojis if the user explicitly asks for emojis in their prompt.
+2. CLEAN, WELL-STRUCTURED FORMAT:
+   - Avoid long, dense, clumsy walls of text.
+   - Begin with a direct, concise 1-2 sentence response addressing the core question.
+   - Use bullet points (• or -) whenever providing lists, methodology steps, key findings, comparisons, or data points.
+   - Use bold section titles (e.g., **Key Findings:**, **Methodology:**, **Evidence / Data:**, **Conclusion:**) when organizing distinct sections.
+   - Insert clear line breaks between sections for high readability.
+3. ACADEMIC & PRECISE:
+   - Base answers strictly on the provided PDF content.
+   - If the answer cannot be found in the provided paper text, state clearly: "The provided paper does not contain information regarding this topic."
+   - Do not include conversational filler (e.g. avoid "Sure! Here is the information:"). Start directly with the answer.
 
 Answer:"""
 
@@ -877,33 +897,81 @@ Examples of good questions for "women safety app":
 Now generate for the query: "{query}"
 Return ONLY the JSON, no explanation."""
 
+    def get_fallback():
+        words = [w for w in re.findall(r'\b[A-Za-z]{3,}\b', query) if w.lower() not in ('the', 'and', 'for', 'with', 'about', 'from')]
+        kws = words[:5] if words else [query]
+        title_q = query.strip().title()
+        return {
+            "success": True,
+            "keywords": kws,
+            "questions": [
+                {
+                    "question": f"What specific aspect of {title_q} are you focusing on?",
+                    "options": [
+                        f"{title_q} Strategies & Architectures",
+                        "Backtesting & Quantitative Performance",
+                        "Risk Management & Execution",
+                        "Comparative Surveys & Literature"
+                    ]
+                },
+                {
+                    "question": "What methodology or technical approach do you prefer?",
+                    "options": [
+                        "Machine Learning & AI Techniques",
+                        "Mathematical & Statistical Arbitrage",
+                        "High-Frequency & Low-Latency Systems",
+                        "Empirical Datasets & Backtests"
+                    ]
+                },
+                {
+                    "question": "Preferred publication timeframe?",
+                    "options": [
+                        "Recent Research (2023–2026)",
+                        "Last 5 Years (2020–2026)",
+                        "Foundational & Highly Cited"
+                    ]
+                }
+            ]
+        }
+
     try:
         client   = Groq(api_key=api_key)
         response = call_groq(
             client=client,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
-            preferred_model=model
+            preferred_model=model,
+            response_format={"type": "json_object"}
         )
         raw = response.choices[0].message.content.strip()
 
+        # Remove thinking/reasoning blocks
+        raw = re.sub(r'<think>[\s\S]*?</think>', '', raw, flags=re.DOTALL).strip()
         # Strip markdown code fences if present
         raw = re.sub(r'^```(?:json)?\s*', '', raw)
         raw = re.sub(r'\s*```$',          '', raw)
+        raw = raw.strip('`').strip()
+
+        # Extract JSON block
+        json_match = re.search(r'\{[\s\S]*\}', raw)
+        if json_match:
+            raw = json_match.group(0)
 
         parsed = json.loads(raw)
+        kws = parsed.get("keywords", [])
+        qs = parsed.get("questions", [])
+
+        if not qs:
+            return jsonify(get_fallback())
 
         return jsonify({
             "success":   True,
-            "keywords":  parsed.get("keywords",  []),
-            "questions": parsed.get("questions", []),
+            "keywords":  kws,
+            "questions": qs,
         })
 
-    except json.JSONDecodeError:
-        # AI returned non-JSON — return empty so frontend falls back gracefully
-        return jsonify({"success": True, "keywords": [], "questions": []})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        return jsonify(get_fallback())
 
 
 if __name__ == '__main__':
