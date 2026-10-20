@@ -26,6 +26,35 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ── Helper functions ─────────────────────────────────────────
 
+def call_groq(client, messages, max_tokens=1000):
+    """
+    Call Groq API with automatic fallback if a model is deprecated or unavailable.
+    """
+    candidate_models = [
+        os.environ.get('GROQ_MODEL', 'llama-3.1-8b-instant'),
+        'llama-3.1-8b-instant',
+        'llama-3.3-70b-versatile',
+        'llama3-8b-8192',
+    ]
+    seen = set()
+    models = [m for m in candidate_models if m and not (m in seen or seen.add(m))]
+
+    last_exc = None
+    for model_name in models:
+        try:
+            return client.chat.completions.create(
+                model=model_name,
+                max_tokens=max_tokens,
+                messages=messages
+            )
+        except Exception as e:
+            last_exc = e
+            err_msg = str(e).lower()
+            if 'model_not_found' in err_msg or 'does not exist' in err_msg or 'not have access' in err_msg:
+                continue
+            raise e
+    raise last_exc
+
 def clean_text(text):
     text = re.sub(r'[^\x20-\x7E\n]', ' ', text)
     text = re.sub(r'\s+', ' ', text)
@@ -309,10 +338,10 @@ Answer:"""
 
     try:
         client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
+        response = call_groq(
+            client=client,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000
         )
         answer = response.choices[0].message.content
         return jsonify({"success": True, "answer": answer})
@@ -458,10 +487,10 @@ Minimum 2500 words. All body text in flowing academic paragraphs, no bullet poin
 
     try:
         client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=6000,
-            messages=[{"role": "user", "content": prompt}]
+        response = call_groq(
+            client=client,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=6000
         )
         paper_content = sanitize_text(response.choices[0].message.content)
     except Exception as e:
@@ -805,10 +834,10 @@ Return ONLY the JSON, no explanation."""
 
     try:
         client   = Groq(api_key=os.environ.get('GROQ_API_KEY'))
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=600,
-            messages=[{"role": "user", "content": prompt}]
+        response = call_groq(
+            client=client,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600
         )
         raw = response.choices[0].message.content.strip()
 
